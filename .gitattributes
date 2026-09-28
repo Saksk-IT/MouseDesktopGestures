@@ -1,0 +1,5 @@
+*.ahk -text
+*.exe binary
+*.ico binary
+*.png binary
+*.zip binary

@@ -1,0 +1,26 @@
+{
+  "SchemaVersion": 2,
+  "Threshold": 80,
+  "ShortClickMs": 350,
+  "LockMs": 40,
+  "AxisRatio": 135,
+  "DebounceMs": 180,
+  "Debug": 0,
+  "ExcludedApps": [],
+  "XButton1": {
+    "Enabled": 1,
+    "ShortClick": 1,
+    "Left": "desktop_right",
+    "Right": "desktop_left",
+    "Up": "task_view",
+    "Down": "none"
+  },
+  "XButton2": {
+    "Enabled": 1,
+    "ShortClick": 1,
+    "Left": "desktop_right",
+    "Right": "desktop_left",
+    "Up": "task_view",
+    "Down": "none"
+  }
+}

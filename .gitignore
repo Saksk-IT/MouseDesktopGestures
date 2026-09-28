@@ -1,0 +1,6 @@
+config.json.bak
+config.json.tmp
+logs/
+*.log
+*.log.1
+*.lnk

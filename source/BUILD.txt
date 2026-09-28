@@ -1,0 +1,39 @@
+﻿MouseDesktopGestures 1.4.1
+
+Runtime: official unmodified AutoHotkey 2.0.28 x64.
+Compiler: official Ahk2Exe 1.1.47.02a2, no compression.
+JSON reader/writer: local Json.ahk, no external runtime dependencies.
+
+Build (replace paths with local tool paths):
+Ahk2Exe.exe /in MouseDesktopGestures.ahk /out ..\MouseDesktopGestures.exe /base AutoHotkey64.exe /compress 0
+
+Save .ahk source files as UTF-8 with BOM for Chinese text.
+Json.ahk and UiTheme.ahk are included into the compiled EXE and need not be next to the EXE at runtime.
+Application source license: GPL-2.0-or-later.
+Runtime license: ../licenses/AutoHotkey-GPL-2.0.txt.
+Runtime source archive included for redistribution.
+https://github.com/AutoHotkey/AutoHotkey/tree/v2.0.28
+https://github.com/AutoHotkey/Ahk2Exe/releases/tag/Ahk2Exe1.1.47.02a2
+
+Self-test (optional second argument is a scratch directory):
+MouseDesktopGestures.exe --self-test C:\path\to\scratch
+Checks JSON validation and Unicode, config backup/roundtrip and INI migration,
+stable direction locking and cancellation, exclusions, GUI save, detection mode,
+debug log rotation, pause/resume and an isolated startup shortcut.
+It never changes the real Windows startup shortcut.
+Exit 0 indicates success. Test config/log files remain in the scratch directory.
+
+Open settings on launch: MouseDesktopGestures.exe --settings
+Open mouse detector on launch: MouseDesktopGestures.exe --detect
+
+
+1.4 builds include ../assets/app.ico through SetMainIcon. Preserve this relative path when building.
+Self-tests also verify GUI draft export, import preview/cancel/apply, previous-config restore, invalid imports and About version.
+Open About on launch: MouseDesktopGestures.exe --about
+
+1.4 uses native Windows controls with a light sidebar layout and owner-drawn buttons.
+UiTheme.ahk must remain alongside the main source when building.
+
+
+1.4.1 checks all six switch click events, hidden checkbox visibility and draft-only changes.
+
