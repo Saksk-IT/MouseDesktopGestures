@@ -6,6 +6,7 @@
   "AxisRatio": 135,
   "DebounceMs": 180,
   "Debug": 0,
+  "SilentMode": 0,
   "ExcludedApps": [],
   "XButton1": {
     "Enabled": 1,

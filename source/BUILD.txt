@@ -1,7 +1,7 @@
-﻿MouseDesktopGestures 1.4.1
+﻿MouseDesktopGestures 1.5.1
 
 Runtime: official unmodified AutoHotkey 2.0.28 x64.
-Compiler: official Ahk2Exe 1.1.47.02a2, no compression.
+Compiler: official Ahk2Exe 1.1.37.02a2, no compression.
 JSON reader/writer: local Json.ahk, no external runtime dependencies.
 
 Build (replace paths with local tool paths):
@@ -13,7 +13,7 @@ Application source license: GPL-2.0-or-later.
 Runtime license: ../licenses/AutoHotkey-GPL-2.0.txt.
 Runtime source archive included for redistribution.
 https://github.com/AutoHotkey/AutoHotkey/tree/v2.0.28
-https://github.com/AutoHotkey/Ahk2Exe/releases/tag/Ahk2Exe1.1.47.02a2
+https://github.com/AutoHotkey/Ahk2Exe/releases/tag/Ahk2Exe1.1.37.02a2
 
 Self-test (optional second argument is a scratch directory):
 MouseDesktopGestures.exe --self-test C:\path\to\scratch
@@ -36,4 +36,6 @@ UiTheme.ahk must remain alongside the main source when building.
 
 
 1.4.1 checks all six switch click events, hidden checkbox visibility and draft-only changes.
+
+1.5.1 adds SilentMode to JSON, a same-path single-instance message, and --startup for quiet logon.
 

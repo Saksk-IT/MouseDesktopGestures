@@ -1,10 +1,11 @@
 ﻿#Requires AutoHotkey v2.0
-#SingleInstance Force
+#NoTrayIcon
+#SingleInstance Off
 #Include Json.ahk
 #Include UiTheme.ahk
 ;@Ahk2Exe-SetName 鼠标桌面手势
 ;@Ahk2Exe-SetDescription 带方向锁定、按键检测和应用白名单的鼠标手势
-;@Ahk2Exe-SetVersion 1.4.1
+;@Ahk2Exe-SetVersion 1.5.1
 ;@Ahk2Exe-SetMainIcon ..\assets\app.ico
 
 CoordMode "Mouse", "Screen"
@@ -12,6 +13,11 @@ Persistent
 ActionIds := ["none", "desktop_left", "desktop_right", "task_view", "show_desktop", "next_window", "maximize"]
 ActionLabels := ["无操作", "切到左侧桌面", "切到右侧桌面", "打开任务视图", "显示／恢复桌面", "切换到下一窗口", "最大化／还原窗口"]
 TestMode := A_Args.Length && A_Args[1] = "--self-test"
+LaunchMode := A_Args.Length ? A_Args[1] : "--settings"
+InstanceMutex := 0
+if !TestMode && !ClaimInstance(LaunchMode)
+    ExitApp()
+OnMessage(0x802B, ReceiveLaunchRequest)
 BaseDir := A_ScriptDir
 SplitPath (A_IsCompiled ? A_ScriptFullPath : A_AhkPath), &SelfExe
 SelfExe := StrLower(SelfExe)
@@ -21,6 +27,8 @@ StartupPath := A_Startup "\MouseDesktopGestures.lnk"
 Paused := false, Busy := false, Detecting := false, Generation := 0
 SettingsGui := 0, DetectorGui := 0, LastActionAt := -100000
 AboutGui := 0
+AuthorUrl := "https://github.com/Saksk-IT"
+RepositoryUrl := "https://github.com/Saksk-IT/MouseDesktopGestures"
 IconResource := A_IsCompiled ? A_ScriptFullPath : A_ScriptDir "\..\assets\app.ico"
 if FileExist(IconResource)
     TraySetIcon IconResource, 1, true
@@ -42,6 +50,8 @@ catch as err
     Config := Defaults()
     ConfigWarning := "JSON 配置读取失败，暂用默认设置。原文件保留；保存前请先修正或备份。`n" err.Message
 }
+if !TestMode
+    MigrateStartupShortcut()
 
 A_TrayMenu.Delete()
 A_TrayMenu.Add("设置", ShowSettings)
@@ -50,6 +60,7 @@ A_TrayMenu.Add("Debug 日志", ToggleDebug)
 A_TrayMenu.Add("打开日志目录", OpenLogs)
 A_TrayMenu.Add("暂停手势", TogglePause)
 A_TrayMenu.Add("开机启动", ToggleStartup)
+A_TrayMenu.Add("静默模式", ToggleSilentMode)
 A_TrayMenu.Add("使用说明", ShowHelp)
 A_TrayMenu.Add("关于", ShowAbout)
 A_TrayMenu.Add()
@@ -78,21 +89,83 @@ if !FileExist(ConfigPath)
     catch as err
         ConfigWarning := "无法保存配置，请把程序移到可写入的文件夹。`n" err.Message
 }
-Log("startup", "version=1.4.1")
+Log("startup", "version=1.5.1")
 if ConfigWarning != ""
     TrayTip ConfigWarning, "鼠标桌面手势 · 配置提示", "Icon!"
 SetTimer UpdateContext, 50
-if A_Args.Length && A_Args[1] = "--settings"
+if LaunchMode = "--settings"
     ShowSettings()
-else if A_Args.Length && A_Args[1] = "--detect"
+else if LaunchMode = "--detect"
     ShowDetector()
-else if A_Args.Length && A_Args[1] = "--about"
+else if LaunchMode = "--about"
     ShowAbout()
+
+ClaimInstance(mode)
+{
+    global InstanceMutex
+    hash := 0
+    Loop Parse, StrLower(A_ScriptFullPath)
+        hash := (hash * 131 + Ord(A_LoopField)) & 0xFFFFFFFF
+    name := "Local\MouseDesktopGestures-" Format("{:08X}", hash)
+    Loop 40
+    {
+        handle := DllCall("kernel32\CreateMutexW", "Ptr", 0, "Int", 0, "Str", name, "Ptr")
+        if !handle
+            throw OSError(A_LastError, "CreateMutexW")
+        already := A_LastError = 183
+        if !already
+        {
+            InstanceMutex := handle
+            return true
+        }
+        DllCall("kernel32\CloseHandle", "Ptr", handle)
+        DetectHiddenWindows true
+        for hwnd in WinGetList("ahk_class AutoHotkey")
+        {
+            if WinGetPID(hwnd) != DllCall("GetCurrentProcessId")
+                && StrLower(WinGetTitle(hwnd)) = StrLower(A_ScriptFullPath)
+            {
+                request := mode = "--startup" ? 0 : mode = "--detect" ? 2 : mode = "--about" ? 3 : 1
+                PostMessage 0x802B, request, 0, hwnd
+                return false
+            }
+        }
+        Sleep 50
+    }
+    MsgBox "程序已在启动中，请稍后再试。", "鼠标桌面手势", "Icon!"
+    return false
+}
+
+ReceiveLaunchRequest(request, *)
+{
+    if request = 1
+        SetTimer ShowSettings, -1
+    else if request = 2
+        SetTimer ShowDetector, -1
+    else if request = 3
+        SetTimer ShowAbout, -1
+    return true
+}
+
+MigrateStartupShortcut()
+{
+    global ConfigWarning, StartupPath
+    if !FileExist(StartupPath)
+        return
+    try
+    {
+        FileGetShortcut StartupPath, &target, &workingDir, &arguments
+        if A_IsCompiled && StrLower(target) = StrLower(A_ScriptFullPath) && arguments = ""
+            SetStartup(true)
+    }
+    catch as err
+        ConfigWarning .= "`n无法更新开机启动快捷方式：" err.Message
+}
 
 Defaults()
 {
     cfg := Map("SchemaVersion", 2, "Threshold", 80, "ShortClickMs", 350, "LockMs", 40,
-        "AxisRatio", 135, "DebounceMs", 180, "Debug", 0, "ExcludedApps", [])
+        "AxisRatio", 135, "DebounceMs", 180, "Debug", 0, "SilentMode", 0, "ExcludedApps", [])
     for button in ["XButton1", "XButton2"]
         cfg[button] := Map("Enabled", 1, "ShortClick", 1, "Left", "desktop_right", "Right", "desktop_left", "Up", "task_view", "Down", "none")
     return cfg
@@ -119,7 +192,7 @@ NormalizeConfig(raw)
     if raw.Has("SchemaVersion") && raw["SchemaVersion"] != 2
         throw ValueError("不支持的配置版本")
     cfg := Defaults()
-    for key, bounds in Map("Threshold", [10, 1000], "ShortClickMs", [100, 1500], "LockMs", [0, 250], "AxisRatio", [105, 300], "DebounceMs", [0, 1000], "Debug", [0, 1])
+    for key, bounds in Map("Threshold", [10, 1000], "ShortClickMs", [100, 1500], "LockMs", [0, 250], "AxisRatio", [105, 300], "DebounceMs", [0, 1000], "Debug", [0, 1], "SilentMode", [0, 1])
         if raw.Has(key) && IsInteger(raw[key]) && raw[key] >= bounds[1] && raw[key] <= bounds[2]
             cfg[key] := Integer(raw[key])
     for button in ["XButton1", "XButton2"]
@@ -388,13 +461,34 @@ RefreshTray()
 {
     global Paused, Detecting, Config
     status := Detecting ? "检测模式" : Paused ? "已暂停" : IsExcluded(ForegroundApp()) ? "应用白名单 · 已禁用" : "已启用"
-    A_IconTip := "鼠标桌面手势 1.4.1 · " status
-    for item, checked in Map("暂停手势", Paused, "开机启动", StartupEnabled(), "Debug 日志", Config["Debug"], "鼠标按键检测", Detecting)
+    A_IconTip := "鼠标桌面手势 1.5.1 · " status
+    for item, checked in Map("暂停手势", Paused, "开机启动", StartupEnabled(), "静默模式", Config["SilentMode"], "Debug 日志", Config["Debug"], "鼠标按键检测", Detecting)
         if checked
             A_TrayMenu.Check(item)
         else
             A_TrayMenu.Uncheck(item)
+    A_IconHidden := !!Config["SilentMode"]
     UpdateUiStatus()
+}
+
+ToggleSilentMode(*)
+{
+    global Config, ConfigPath, SettingsGui
+    cfg := Json.Parse(Json.Dump(Config))
+    cfg["SilentMode"] := !cfg["SilentMode"]
+    try WriteConfig(ConfigPath, cfg)
+    catch as err
+    {
+        MsgBox err.Message, "无法保存静默模式", "Icon!"
+        return
+    }
+    Config := cfg
+    RefreshTray()
+    if SettingsGui
+    {
+        SettingsGui["SilentMode"].Value := cfg["SilentMode"]
+        UiRefreshSwitches(SettingsGui)
+    }
 }
 
 TogglePause(*)
@@ -568,7 +662,7 @@ SetStartup(enabled)
     if enabled
     {
         target := A_IsCompiled ? A_ScriptFullPath : A_AhkPath
-        args := A_IsCompiled ? "" : '"' A_ScriptFullPath '"'
+        args := A_IsCompiled ? "--startup" : '"' A_ScriptFullPath '" --startup'
         FileCreateShortcut target, StartupPath, A_ScriptDir, args, "鼠标桌面手势"
     }
     else if FileExist(StartupPath)
@@ -661,12 +755,13 @@ UpdateUiStatus()
     SettingsGui["UiStatus"].Text := status
     name := app = SelfExe ? "设置窗口" : app = "" ? "桌面" : app
     SettingsGui["UiContext"].Text := "前台：" name
+    SettingsGui["PauseAction"].Text := Paused ? "恢复手势" : "暂停手势"
 }
 
 BuildSettings()
 {
     global SettingsGui, Config, DraftApps, IconResource, PageControls, NavigationButtons
-    g := UiBase("鼠标桌面手势 1.4.1 · 设置")
+    g := UiBase("鼠标桌面手势 1.5.1 · 设置")
     SettingsGui := g
     PageControls := Map(), NavigationButtons := Map()
     if FileExist(IconResource)
@@ -685,7 +780,7 @@ BuildSettings()
     UiText(g, "x40 y133 w130 h20", "设置", 9, "94A3B8")
     for index, label in ["常规设置", "侧键手势", "应用白名单", "配置管理"]
         NavigationButtons[index] := UiButton(g, "x32 y" (171 + (index - 1) * 54) " w148 h42", label, SwitchSettingsPage.Bind(index), "nav")
-    UiText(g, "x40 y462 w130 h18", "VERSION 1.4.1", 8, "94A3B8")
+    UiText(g, "x40 y462 w130 h18", "VERSION 1.5.1", 8, "94A3B8")
     UiButton(g, "x32 y492 w148 h34", "关于这个应用", ShowAbout, "nav")
     UiCard(g, 212, 112, 628, 436)
 
@@ -702,11 +797,14 @@ BuildSettings()
         UiText(g, "x636 y" (y + 5) " w176 h22", hints[index], 9, "94A3B8")
     }
     g.AddText("x236 y410 w580 h1 BackgroundEEF2F7", "")
-    UiSwitch(g, "x236 y430 w264 h32 vDebug", "Debug 日志")
-    UiSwitch(g, "x536 y430 w264 h32 vStartup", "开机启动")
-    UiButton(g, "x236 y480 w172 h36", "检测鼠标按键", ShowDetector)
-    UiButton(g, "x428 y480 w172 h36", "查看日志目录", OpenLogs)
-    UiText(g, "x620 y488 w192 h22", "日志默认关闭", 9, "94A3B8")
+    UiSwitch(g, "x236 y422 w264 h32 vDebug", "Debug 日志")
+    UiSwitch(g, "x536 y422 w264 h32 vStartup", "开机启动")
+    UiSwitch(g, "x236 y464 w264 h32 vSilentMode", "静默模式")
+    UiText(g, "x536 y470 w272 h22", "隐藏托盘；再次打开 EXE 可管理", 9, "64748B")
+    UiButton(g, "x236 y506 w132 h32", "检测按键", ShowDetector)
+    UiButton(g, "x380 y506 w132 h32", "查看日志", OpenLogs)
+    UiButton(g, "x524 y506 w132 h32 vPauseAction", "暂停手势", TogglePause)
+    UiButton(g, "x668 y506 w148 h32", "退出程序", (*) => ExitApp())
     RememberPage(g, 1, before)
 
     before := ControlSnapshot(g)
@@ -756,7 +854,7 @@ BuildSettings()
 FillSettings(cfg)
 {
     global SettingsGui, DraftApps, ConfigPath
-    for key in ["Threshold", "ShortClickMs", "LockMs", "AxisRatio", "DebounceMs", "Debug"]
+    for key in ["Threshold", "ShortClickMs", "LockMs", "AxisRatio", "DebounceMs", "Debug", "SilentMode"]
         SettingsGui[key].Value := cfg[key]
     SettingsGui["Startup"].Value := StartupEnabled()
     for button in ["XButton1", "XButton2"]
@@ -784,7 +882,7 @@ ReadTransferConfig(path)
     raw := Json.Parse(FileRead(path, "UTF-8"))
     if !(raw is Map) || !raw.Has("SchemaVersion") || raw["SchemaVersion"] != 2
         throw ValueError("不是支持的配置文件（需要 JSON 配置版本 2）。")
-    for key, limits in Map("Threshold", [10, 1000], "ShortClickMs", [100, 1500], "LockMs", [0, 250], "AxisRatio", [105, 300], "DebounceMs", [0, 1000], "Debug", [0, 1])
+    for key, limits in Map("Threshold", [10, 1000], "ShortClickMs", [100, 1500], "LockMs", [0, 250], "AxisRatio", [105, 300], "DebounceMs", [0, 1000], "Debug", [0, 1], "SilentMode", [0, 1])
         if raw.Has(key) && (!IsInteger(raw[key]) || raw[key] < limits[1] || raw[key] > limits[2])
             throw ValueError("配置参数无效：" key)
     for button in ["XButton1", "XButton2"]
@@ -882,7 +980,7 @@ RestorePrevious(*)
 
 ShowAbout(*)
 {
-    global AboutGui, IconResource
+    global AboutGui, IconResource, AuthorUrl, RepositoryUrl
     if AboutGui
     {
         AboutGui.Show()
@@ -894,15 +992,26 @@ ShowAbout(*)
         g.AddPicture("x28 y28 w76 h76 Icon1", IconResource)
     UiText(g, "x128 y29 w354 h34", "鼠标桌面手势", 18, "0F172A", true)
     UiText(g, "x130 y76 w354 h22", "Mouse Desktop Gestures", 10, "64748B")
-    UiText(g, "x28 y133 w450 h28 vVersionInfo", "版本 1.4.1  ·  Windows 10 / 11 x64", 10, "2563EB")
+    UiText(g, "x28 y133 w450 h28 vVersionInfo", "版本 1.5.1  ·  Windows 10 / 11 x64", 10, "2563EB")
     g.AddText("x28 y179 w450 h1 BackgroundE8EDF4", "")
     UiText(g, "x28 y203 w450 h74", "按住侧键，滑动切换桌面。`n保留短按原功能，让鼠标操作更顺手。", 11, "334155")
     UiText(g, "x28 y289 w450 h48", "免安装运行  ·  JSON 配置  ·  配置分享`n运行引擎：AutoHotkey " A_AhkVersion, 9, "64748B")
-    UiText(g, "x28 y352 w450 h42", "图标由 AI 生图生成。`n源码与运行引擎许可证随分享包附带。", 9, "94A3B8")
-    UiButton(g, "x340 y418 w138 h38 Default", "关闭", CloseAbout, "primary")
+    UiText(g, "x28 y352 w60 h24", "作者：", 10, "334155")
+    author := g.AddLink("x87 y352 w360 h24 vAuthorLink", '<a href="' AuthorUrl '">Saksk-IT</a>')
+    author.OnEvent("Click", OpenWebLink.Bind(AuthorUrl))
+    UiText(g, "x28 y382 w100 h24", "GitHub 仓库：", 10, "334155")
+    repository := g.AddLink("x132 y382 w350 h24 vRepositoryLink", '<a href="' RepositoryUrl '">Saksk-IT/MouseDesktopGestures</a>')
+    repository.OnEvent("Click", OpenWebLink.Bind(RepositoryUrl))
+    UiText(g, "x28 y421 w450 h42", "图标由 AI 生图生成。`n源码与运行引擎许可证随分享包附带。", 9, "94A3B8")
+    UiButton(g, "x340 y482 w138 h38 Default", "关闭", CloseAbout, "primary")
     g.OnEvent("Close", CloseAbout), g.OnEvent("Escape", CloseAbout)
     AboutGui := g
-    g.Show("w506 h484")
+    g.Show("w506 h548")
+}
+
+OpenWebLink(url, *)
+{
+    Run url
 }
 
 CloseAbout(*)
@@ -1009,6 +1118,7 @@ SettingsConfig()
         cfg[key] := Integer(value)
     }
     cfg["Debug"] := SettingsGui["Debug"].Value
+    cfg["SilentMode"] := SettingsGui["SilentMode"].Value
     cfg["ExcludedApps"] := DraftApps.Clone()
     for button in ["XButton1", "XButton2"]
     {
@@ -1054,7 +1164,7 @@ ShowHelp(*)
         . "`n`n配置为 config.json；首次升级自动读取旧 config.ini，原 INI 保留。"
         . "`n手工修改 JSON 后需重启。保存时上一份 JSON 备份为 config.json.bak。"
         . "`n开机启动是当前用户的启动快捷方式，移动程序后请关闭再开启该选项。",
-        "鼠标桌面手势 1.4.1 · 使用说明", "Iconi"
+        "鼠标桌面手势 1.5.1 · 使用说明", "Iconi"
 }
 
 Assert(value, message)
@@ -1084,7 +1194,7 @@ TestUiSwitches()
         Assert(value.Value = original, "Switch click did not restore its setting")
         count += 1
     }
-    Assert(count = 6 && Json.Dump(Config) = before, "Switches changed live config before saving")
+    Assert(count = 7 && Json.Dump(Config) = before, "Switches changed live config before saving")
     SwitchSettingsPage(1)
 }
 
@@ -1133,6 +1243,15 @@ RunSelfTest()
     ApplyConfig()
     BuildSettings()
     TestUiSwitches()
+    SettingsGui["SilentMode"].Value := 1
+    Assert(SettingsConfig()["SilentMode"] = 1 && Config["SilentMode"] = 0, "Silent mode draft applied early")
+    FillSettings(Config)
+    Config["SilentMode"] := 1
+    RefreshTray()
+    Assert(A_IconHidden = 1, "Silent mode did not hide tray icon")
+    Config["SilentMode"] := 0
+    RefreshTray()
+    Assert(A_IconHidden = 0, "Leaving silent mode did not restore tray icon")
     SettingsGui["Threshold"].Value := 100
     SettingsGui["XButton2Up"].Choose(ActionIndex("maximize"))
     SettingsGui["NewExe"].Value := "Game.exe"
@@ -1159,8 +1278,15 @@ RunSelfTest()
     Log("after_rotation")
     Assert(FileExist(BaseDir "\logs\debug.log.1") && FileGetSize(BaseDir "\logs\debug.log") < 1000, "Log rotation failed")
     SetStartup(true)
-    FileGetShortcut StartupPath, &target
-    Assert(target = (A_IsCompiled ? A_ScriptFullPath : A_AhkPath), "Startup target")
+    FileGetShortcut StartupPath, &target, , &startupArguments
+    Assert(target = (A_IsCompiled ? A_ScriptFullPath : A_AhkPath) && InStr(startupArguments, "--startup"), "Startup target or silent launch argument")
+    if A_IsCompiled
+    {
+        FileCreateShortcut A_ScriptFullPath, StartupPath, A_ScriptDir, "", "旧版启动快捷方式"
+        MigrateStartupShortcut()
+        FileGetShortcut StartupPath, &target, , &startupArguments
+        Assert(target = A_ScriptFullPath && startupArguments = "--startup", "Legacy startup shortcut migration")
+    }
     SetStartup(false)
     Config := Defaults()
     Config["Threshold"] := 90
@@ -1168,12 +1294,13 @@ RunSelfTest()
     BuildSettings()
     SettingsGui["Threshold"].Value := 130
     SettingsGui["Startup"].Value := 1
+    SettingsGui["SilentMode"].Value := 1
     SettingsGui["NewExe"].Value := "ExportGame.exe"
     AddApp()
     sharePath := BaseDir "\shared-settings.json"
     ExportConfigFile(sharePath, SettingsConfig())
     shared := ReadTransferConfig(sharePath)
-    Assert(shared["Threshold"] = 130 && shared["ExcludedApps"][1] = "exportgame.exe", "Export GUI draft failed")
+    Assert(shared["Threshold"] = 130 && shared["SilentMode"] = 1 && shared["ExcludedApps"][1] = "exportgame.exe", "Export GUI draft failed")
     Assert(!shared.Has("Startup") && !StartupEnabled() && LoadConfig(ConfigPath)["Threshold"] = 90 && Config["Threshold"] = 90, "Export changed live settings or shared startup")
     FillSettings(Defaults())
     SettingsGui["Startup"].Value := 1
@@ -1184,7 +1311,7 @@ RunSelfTest()
     BuildSettings()
     LoadTransferPreview(sharePath, "导入配置")
     SaveSettings()
-    Assert(Config["Threshold"] = 130 && LoadConfig(ConfigPath ".bak")["Threshold"] = 90, "Import apply or backup failed")
+    Assert(Config["Threshold"] = 130 && Config["SilentMode"] = 1 && LoadConfig(ConfigPath ".bak")["Threshold"] = 90, "Import apply or backup failed")
     BuildSettings()
     RestorePrevious()
     Assert(SettingsGui["Threshold"].Value = 90 && Config["Threshold"] = 130, "Restore should only preview")
@@ -1205,8 +1332,8 @@ RunSelfTest()
         rejected := true
     Assert(rejected && LoadConfig(ConfigPath)["Threshold"] = 90, "Export overwrote live config")
     ShowAbout()
-    Assert(InStr(AboutGui["VersionInfo"].Text, "1.4.1"), "About version wrong")
+    Assert(InStr(AboutGui["VersionInfo"].Text, "1.5.1"), "About version wrong")
+    Assert(InStr(AboutGui["AuthorLink"].Text, "Saksk-IT"), "About author missing")
+    Assert(InStr(AboutGui["RepositoryLink"].Text, "Saksk-IT/MouseDesktopGestures"), "About repository missing")
     CloseAbout()
 }
-
-
