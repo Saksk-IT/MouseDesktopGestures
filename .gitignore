@@ -9,3 +9,13 @@ logs/
 *.log
 *.log.1
 *.lnk
+AGENTS.md
+config.ini
+*.local.*
+*.private.*
+.env
+.env.*
+*.pem
+*.pfx
+*.p12
+*.key

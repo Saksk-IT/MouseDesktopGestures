@@ -16,8 +16,9 @@ pwsh ./scripts/build.ps1 -UpdateTrackedExe -InstanceStress -Package
 脚本从官方 GitHub Release 下载上述固定工具版本到 .tools/，先验证 SHA-256，
 再编译到 dist/。它会检查 VERSION 与源码、说明、EXE 的版本一致性，
 运行 EXE --self-test，验证通过后才更新根目录 EXE。
-发布打包只显式复制所需文件：仓库的 config.default.json 在 ZIP 中命名为
-config.json；仓库目录中运行产生的个人 config.json 不会进入 ZIP。
+发布打包只从脚本中的固定文件清单复制：仓库的 config.default.json 在 ZIP 中命名为
+config.json；仓库目录中运行产生的个人 config.json，以及临时加入源码或素材目录的文件，
+都不会进入 ZIP。发布前仍须检查 Git 暂存内容是否含个人文件。
 dist/ 和 .tools/ 已被 Git 忽略。自检产生的临时文件留在 dist/ 供排错。
 
 直接运行自检：

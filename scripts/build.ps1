@@ -95,8 +95,22 @@ if ($Package) {
         $from = if ($item -eq 'MouseDesktopGestures.exe') { $output } else { Join-Path $root $item }
         Copy-Item -LiteralPath $from -Destination (Join-Path $stageFull $item)
     }
-    foreach ($folder in @('source', 'assets', 'licenses')) {
-        Copy-Item -LiteralPath (Join-Path $root $folder) -Destination $stageFull -Recurse
+    # 发布包只从明确批准的文件清单复制，避免临时放进素材或源码目录的私人文件随包发布。
+    $releaseFiles = @(
+        'assets/app-icon.png',
+        'assets/app.ico',
+        'assets/icon-prompt.txt',
+        'licenses/AutoHotkey-GPL-2.0.txt',
+        'source/AutoHotkey-v2.0.28-source.zip',
+        'source/BUILD.txt',
+        'source/Json.ahk',
+        'source/MouseDesktopGestures.ahk',
+        'source/UiTheme.ahk'
+    )
+    foreach ($relativePath in $releaseFiles) {
+        $destination = Join-Path $stageFull $relativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $root $relativePath) -Destination $destination
     }
     Copy-Item -LiteralPath (Join-Path $root 'config.default.json') -Destination (Join-Path $stageFull 'config.json')
     $zip = Join-Path $distDir "MouseDesktopGestures-$version-windows-x64.zip"
