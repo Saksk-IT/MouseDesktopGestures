@@ -1,4 +1,5 @@
 ﻿; Native Windows UI styling. No web view or additional runtime dependencies.
+; SPDX-License-Identifier: GPL-2.0-or-later
 ThemeButtons := Map()
 ThemeButtonProc := CallbackCreate(ThemeButtonSubclass)
 OnMessage(0x2B, DrawThemeButton)

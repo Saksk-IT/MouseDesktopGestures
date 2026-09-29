@@ -1,5 +1,10 @@
+config.json
 config.json.bak
 config.json.tmp
+config.json.corrupt-*
+config.json.bak-stage-*
+dist/
+.tools/
 logs/
 *.log
 *.log.1

@@ -1,4 +1,5 @@
 ﻿; Standalone JSON reader/writer. Distributed with the application under GPL-2.0-or-later.
+; SPDX-License-Identifier: GPL-2.0-or-later
 class Json
 {
     static Null := {}

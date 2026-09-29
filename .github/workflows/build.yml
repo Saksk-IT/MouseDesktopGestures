@@ -1,0 +1,47 @@
+name: Build and verify
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, self-test and package
+        shell: pwsh
+        run: ./scripts/build.ps1 -Package -InstanceStress
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MouseDesktopGestures
+          path: |
+            dist/MouseDesktopGestures.exe
+            dist/*.zip
+            dist/SHA256SUMS
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: MouseDesktopGestures
+          path: dist
+      - name: Publish release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $zip = "dist/MouseDesktopGestures-$version-windows-x64.zip"
+          gh release create "$env:GITHUB_REF_NAME" dist/MouseDesktopGestures.exe $zip dist/SHA256SUMS --verify-tag --generate-notes

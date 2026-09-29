@@ -1,11 +1,12 @@
 ﻿#Requires AutoHotkey v2.0
 #NoTrayIcon
+; SPDX-License-Identifier: GPL-2.0-or-later
 #SingleInstance Off
 #Include Json.ahk
 #Include UiTheme.ahk
 ;@Ahk2Exe-SetName 鼠标桌面手势
 ;@Ahk2Exe-SetDescription 带方向锁定、按键检测和应用白名单的鼠标手势
-;@Ahk2Exe-SetVersion 1.5.1
+;@Ahk2Exe-SetVersion 1.5.2
 ;@Ahk2Exe-SetMainIcon ..\assets\app.ico
 
 CoordMode "Mouse", "Screen"
@@ -15,10 +16,13 @@ ActionLabels := ["无操作", "切到左侧桌面", "切到右侧桌面", "打�
 TestMode := A_Args.Length && A_Args[1] = "--self-test"
 LaunchMode := A_Args.Length ? A_Args[1] : "--settings"
 InstanceMutex := 0
+InstanceReadyEvent := 0
 if !TestMode && !ClaimInstance(LaunchMode)
     ExitApp()
 OnMessage(0x802B, ReceiveLaunchRequest)
 BaseDir := A_ScriptDir
+OnError(RecordUnhandledError)
+OnExit(FlushOnExit)
 SplitPath (A_IsCompiled ? A_ScriptFullPath : A_AhkPath), &SelfExe
 SelfExe := StrLower(SelfExe)
 ConfigPath := BaseDir "\config.json"
@@ -32,10 +36,11 @@ RepositoryUrl := "https://github.com/Saksk-IT/MouseDesktopGestures"
 IconResource := A_IsCompiled ? A_ScriptFullPath : A_ScriptDir "\..\assets\app.ico"
 if FileExist(IconResource)
     TraySetIcon IconResource, 1, true
-DraftApps := [], LastExternalApp := "", ContextText := "", LogFailed := false
+DraftApps := [], LastExternalApp := "", ContextText := "", LogFailed := false, DebugQueue := []
 AppliedContext := ""
 DetectionKeys := ["LButton", "RButton", "MButton", "XButton1", "XButton2", "WheelUp", "WheelDown", "WheelLeft", "WheelRight"]
 ConfigWarning := ""
+ConfigDamaged := false, ConfigWarnings := []
 if TestMode
 {
     BaseDir := A_Args.Length >= 2 ? A_Args[2] : A_Temp "\MouseDesktopGestures-test-" DllCall("GetCurrentProcessId")
@@ -44,12 +49,16 @@ if TestMode
     LegacyPath := BaseDir "\config.ini"
     StartupPath := BaseDir "\startup-test.lnk"
 }
-try Config := LoadConfig(ConfigPath, LegacyPath)
+try Config := LoadConfig(ConfigPath, LegacyPath, ConfigWarnings)
 catch as err
 {
     Config := Defaults()
-    ConfigWarning := "JSON 配置读取失败，暂用默认设置。原文件保留；保存前请先修正或备份。`n" err.Message
+    ConfigDamaged := true
+    ConfigWarning := "配置读取失败，暂用默认设置。保存时会隔离损坏文件并保留原备份。`n" err.Message
+    RecordError("config_load", err)
 }
+for warning in ConfigWarnings
+    ConfigWarning .= warning "`n"
 if !TestMode
     MigrateStartupShortcut()
 
@@ -69,6 +78,7 @@ A_TrayMenu.Default := "设置"
 RegisterDetection()
 ApplyConfig()
 RefreshTray()
+SetTimer FlushDebugLog, Config["Debug"] ? 300 : 0
 if TestMode
 {
     try
@@ -89,10 +99,15 @@ if !FileExist(ConfigPath)
     catch as err
         ConfigWarning := "无法保存配置，请把程序移到可写入的文件夹。`n" err.Message
 }
-Log("startup", "version=1.5.1")
+Log("startup", "version=1.5.2")
 if ConfigWarning != ""
     TrayTip ConfigWarning, "鼠标桌面手势 · 配置提示", "Icon!"
 SetTimer UpdateContext, 50
+if !TestMode
+{
+    if !DllCall("kernel32\SetEvent", "Ptr", InstanceReadyEvent, "Int")
+        throw OSError(A_LastError, "SetEvent")
+}
 if LaunchMode = "--settings"
     ShowSettings()
 else if LaunchMode = "--detect"
@@ -102,12 +117,13 @@ else if LaunchMode = "--about"
 
 ClaimInstance(mode)
 {
-    global InstanceMutex
+    global InstanceMutex, InstanceReadyEvent
     hash := 0
     Loop Parse, StrLower(A_ScriptFullPath)
         hash := (hash * 131 + Ord(A_LoopField)) & 0xFFFFFFFF
     name := "Local\MouseDesktopGestures-" Format("{:08X}", hash)
-    Loop 40
+    lastSendError := ""
+    Loop 100
     {
         handle := DllCall("kernel32\CreateMutexW", "Ptr", 0, "Int", 0, "Str", name, "Ptr")
         if !handle
@@ -116,19 +132,44 @@ ClaimInstance(mode)
         if !already
         {
             InstanceMutex := handle
+            InstanceReadyEvent := DllCall("kernel32\CreateEventW", "Ptr", 0, "Int", 1, "Int", 0, "Str", name "-Ready", "Ptr")
+            if !InstanceReadyEvent
+                throw OSError(A_LastError, "CreateEventW")
+            DllCall("kernel32\ResetEvent", "Ptr", InstanceReadyEvent)
             return true
         }
         DllCall("kernel32\CloseHandle", "Ptr", handle)
+        ready := DllCall("kernel32\OpenEventW", "UInt", 0x100000, "Int", 0, "Str", name "-Ready", "Ptr")
+        if !ready
+        {
+            Sleep 100
+            continue
+        }
+        waitResult := DllCall("kernel32\WaitForSingleObject", "Ptr", ready, "UInt", 100, "UInt")
+        DllCall("kernel32\CloseHandle", "Ptr", ready)
+        if waitResult != 0
+            continue
         DetectHiddenWindows true
         for hwnd in WinGetList("ahk_class AutoHotkey")
         {
-            if WinGetPID(hwnd) != DllCall("GetCurrentProcessId")
-                && StrLower(WinGetTitle(hwnd)) = StrLower(A_ScriptFullPath)
+            try
             {
-                request := mode = "--startup" ? 0 : mode = "--detect" ? 2 : mode = "--about" ? 3 : 1
-                PostMessage 0x802B, request, 0, hwnd
-                return false
+                if WinGetPID(hwnd) != DllCall("GetCurrentProcessId")
+                    && StrLower(WinGetTitle(hwnd)) = StrLower(A_ScriptFullPath)
+                {
+                    request := mode = "--startup" ? 0 : mode = "--detect" ? 2 : mode = "--about" ? 3 : 1
+                    if DllCall("user32\PostMessageW", "Ptr", hwnd, "UInt", 0x802B, "UPtr", request, "Ptr", 0, "Int")
+                        return false
+                    lastSendError := A_LastError
+                    if lastSendError = 5
+                        MsgBox "无法通知已运行的程序，可能是两个进程权限不同。请从任务管理器打开原程序，或以相同权限重试。", "鼠标桌面手势", "Icon!"
+                    else
+                        MsgBox "无法通知已运行的程序（系统错误 " lastSendError "）。", "鼠标桌面手势", "Icon!"
+                    return false
+                }
             }
+            catch
+                continue
         }
         Sleep 50
     }
@@ -185,7 +226,7 @@ ValidExe(value)
     return Type(value) = "String" && RegExMatch(value, 'i)^[^\\/:*?"<>|\r\n]+\.exe$')
 }
 
-NormalizeConfig(raw)
+NormalizeConfig(raw, warnings := 0)
 {
     if !(raw is Map)
         throw ValueError("配置根节点必须是 JSON 对象")
@@ -193,44 +234,74 @@ NormalizeConfig(raw)
         throw ValueError("不支持的配置版本")
     cfg := Defaults()
     for key, bounds in Map("Threshold", [10, 1000], "ShortClickMs", [100, 1500], "LockMs", [0, 250], "AxisRatio", [105, 300], "DebounceMs", [0, 1000], "Debug", [0, 1], "SilentMode", [0, 1])
-        if raw.Has(key) && IsInteger(raw[key]) && raw[key] >= bounds[1] && raw[key] <= bounds[2]
+    {
+        if !raw.Has(key)
+            continue
+        if IsInteger(raw[key]) && raw[key] >= bounds[1] && raw[key] <= bounds[2]
             cfg[key] := Integer(raw[key])
+        else if warnings is Array
+            warnings.Push(key " 无效，已恢复为默认值 " cfg[key] "。")
+    }
     for button in ["XButton1", "XButton2"]
     {
-        if !raw.Has(button) || !(raw[button] is Map)
+        if !raw.Has(button)
             continue
+        if !(raw[button] is Map)
+            throw ValueError(button " 配置必须是 JSON 对象")
         for key in ["Enabled", "ShortClick"]
-            if raw[button].Has(key) && IsInteger(raw[button][key]) && (raw[button][key] = 0 || raw[button][key] = 1)
+        {
+            if !raw[button].Has(key)
+                continue
+            if IsInteger(raw[button][key]) && (raw[button][key] = 0 || raw[button][key] = 1)
                 cfg[button][key] := Integer(raw[button][key])
+            else if warnings is Array
+                warnings.Push(button "." key " 无效，已恢复默认值。")
+        }
         for direction in ["Left", "Right", "Up", "Down"]
-            if raw[button].Has(direction) && Type(raw[button][direction]) = "String" && ActionIndex(raw[button][direction])
+        {
+            if !raw[button].Has(direction)
+                continue
+            if Type(raw[button][direction]) = "String" && ActionIndex(raw[button][direction])
                 cfg[button][direction] := raw[button][direction]
+            else if warnings is Array
+                warnings.Push(button "." direction " 无效，已恢复默认动作。")
+        }
     }
     if raw.Has("ExcludedApps") && raw["ExcludedApps"] is Array
     {
+        if raw["ExcludedApps"].Length > 100 && warnings is Array
+            warnings.Push("应用白名单超过 100 项，超出部分已忽略。")
         seen := Map()
         for exe in raw["ExcludedApps"]
         {
             if Type(exe) != "String"
+            {
+                if warnings is Array
+                    warnings.Push("应用白名单含无效项，已忽略。")
                 continue
+            }
             exe := StrLower(Trim(exe))
             if ValidExe(exe) && !seen.Has(exe) && cfg["ExcludedApps"].Length < 100
             {
                 cfg["ExcludedApps"].Push(exe)
                 seen[exe] := true
             }
+            else if !ValidExe(exe) && warnings is Array
+                warnings.Push("应用白名单含无效进程名，已忽略。")
         }
     }
+    else if raw.Has("ExcludedApps") && warnings is Array
+        warnings.Push("应用白名单不是数组，已恢复默认值。")
     return cfg
 }
 
-LoadConfig(path, legacy := "")
+LoadConfig(path, legacy := "", warnings := 0)
 {
     if FileExist(path)
     {
         if FileGetSize(path) > 1024 * 1024
             throw ValueError("配置文件超过 1 MB")
-        return NormalizeConfig(Json.Parse(FileRead(path, "UTF-8")))
+        return NormalizeConfig(Json.Parse(FileRead(path, "UTF-8")), warnings)
     }
     cfg := Defaults()
     if legacy != "" && FileExist(legacy)
@@ -244,7 +315,7 @@ LoadConfig(path, legacy := "")
             for key, fallback in cfg[button]
                 raw[button][key] := IniRead(legacy, button, key, fallback)
         }
-        cfg := NormalizeConfig(raw)
+        cfg := NormalizeConfig(raw, warnings)
     }
     return cfg
 }
@@ -252,20 +323,65 @@ LoadConfig(path, legacy := "")
 WriteConfig(path, cfg)
 {
     temp := path ".tmp"
+    quarantined := ""
     try
     {
         if FileExist(temp)
             FileDelete temp
         FileAppend Json.Dump(cfg) "`n", temp, "UTF-8-RAW"
+        if Json.Dump(LoadConfig(temp)) != Json.Dump(NormalizeConfig(cfg))
+            throw ValueError("写入后的配置校验失败")
         if FileExist(path)
-            FileCopy path, path ".bak", 1
-        FileMove temp, path, 1
+        {
+            damaged := false
+            existingWarnings := []
+            try LoadConfig(path, "", existingWarnings)
+            catch
+                damaged := true
+            if existingWarnings.Length
+                damaged := true
+            if damaged
+            {
+                quarantined := path ".corrupt-" A_Now
+                suffix := 1
+                while FileExist(quarantined)
+                    quarantined := path ".corrupt-" A_Now "-" suffix++
+                FileMove path, quarantined
+                try FileMove temp, path
+                catch as err
+                {
+                    if !FileExist(path)
+                        FileMove quarantined, path
+                    throw err
+                }
+            }
+            else
+            {
+                backupStage := path ".bak-stage-" A_Now "-" DllCall("GetCurrentProcessId")
+                suffix := 1
+                while FileExist(backupStage)
+                    backupStage := path ".bak-stage-" A_Now "-" DllCall("GetCurrentProcessId") "-" suffix++
+                if !DllCall("kernel32\ReplaceFileW", "Str", path, "Str", temp, "Str", backupStage, "UInt", 0, "Ptr", 0, "Ptr", 0, "Int")
+                {
+                    code := A_LastError
+                    if !FileExist(path) && FileExist(backupStage)
+                        FileMove backupStage, path
+                    throw OSError(code, "ReplaceFileW")
+                }
+                try FileMove backupStage, path ".bak", 1
+                catch as err
+                    RecordError("config_backup_rotate", err)
+            }
+        }
+        else
+            FileMove temp, path
     }
     finally
     {
         if FileExist(temp)
             FileDelete temp
     }
+    return quarantined
 }
 
 ForegroundApp()
@@ -418,7 +534,10 @@ HandleGesture(button, *)
         Log("gesture_end", "button=" button " dx=" dx " dy=" dy " ms=" duration " locked=" state["Locked"] " action=" action)
     }
     catch as err
+    {
         Log("gesture_error", err.Message)
+        RecordError("gesture", err)
+    }
     finally
         Busy := false
 }
@@ -461,7 +580,7 @@ RefreshTray()
 {
     global Paused, Detecting, Config
     status := Detecting ? "检测模式" : Paused ? "已暂停" : IsExcluded(ForegroundApp()) ? "应用白名单 · 已禁用" : "已启用"
-    A_IconTip := "鼠标桌面手势 1.5.1 · " status
+    A_IconTip := "鼠标桌面手势 1.5.2 · " status
     for item, checked in Map("暂停手势", Paused, "开机启动", StartupEnabled(), "静默模式", Config["SilentMode"], "Debug 日志", Config["Debug"], "鼠标按键检测", Detecting)
         if checked
             A_TrayMenu.Check(item)
@@ -502,24 +621,69 @@ TogglePause(*)
 
 Log(event, details := "")
 {
-    global Config, BaseDir, LogFailed
+    global Config, LogFailed, DebugQueue
     if !Config["Debug"] || LogFailed
         return
+    details := StrReplace(StrReplace(details, "`r", " "), "`n", " ")
+    if DebugQueue.Length >= 5000
+        DebugQueue.RemoveAt(1)
+    DebugQueue.Push(FormatTime(, "yyyy-MM-dd HH:mm:ss") " tick=" A_TickCount " " event " " details "`n")
+}
+
+FlushDebugLog(force := false)
+{
+    global BaseDir, DebugQueue, LogFailed, Busy
+    if !DebugQueue.Length || LogFailed || (Busy && !force)
+        return
+    lines := ""
+    for line in DebugQueue
+        lines .= line
+    DebugQueue := []
     try
     {
         folder := BaseDir "\logs"
         DirCreate folder
         path := folder "\debug.log"
-        if FileExist(path) && FileGetSize(path) > 1024 * 1024
+        if FileExist(path) && FileGetSize(path) + StrLen(lines) * 4 > 1024 * 1024
             FileMove path, path ".1", 1
-        details := StrReplace(StrReplace(details, "`r", " "), "`n", " ")
-        FileAppend FormatTime(, "yyyy-MM-dd HH:mm:ss") " tick=" A_TickCount " " event " " details "`n", path, "UTF-8-RAW"
+        FileAppend lines, path, "UTF-8-RAW"
     }
-    catch
+    catch as err
     {
         LogFailed := true
+        RecordError("debug_log_write", err)
         TrayTip "日志目录无法写入，当前运行期间已停止写日志。", "鼠标桌面手势", "Icon!"
     }
+}
+
+FlushOnExit(*)
+{
+    FlushDebugLog(true)
+}
+
+RecordUnhandledError(err, mode)
+{
+    RecordError("unhandled_" mode, err)
+    return 0
+}
+
+RecordError(context, err)
+{
+    global BaseDir, LaunchMode
+    try
+    {
+        folder := BaseDir "\logs"
+        DirCreate folder
+        path := folder "\error.log"
+        if FileExist(path) && FileGetSize(path) > 256 * 1024
+            FileMove path, path ".1", 1
+        details := "message=" err.Message " what=" err.What " extra=" err.Extra " stack=" err.Stack
+        details := SubStr(StrReplace(StrReplace(details, "`r", " "), "`n", " | "), 1, 4000)
+        entry := FormatTime(, "yyyy-MM-dd HH:mm:ss") " version=1.5.2 pid=" DllCall("GetCurrentProcessId") " launch=" LaunchMode " context=" context " " details "`n"
+        FileAppend entry, path, "UTF-8-RAW"
+    }
+    catch
+        return
 }
 
 ToggleDebug(*)
@@ -534,7 +698,9 @@ ToggleDebug(*)
         return
     }
     Log("debug", "disabled=1")
+    FlushDebugLog()
     Config := cfg, LogFailed := false
+    SetTimer FlushDebugLog, Config["Debug"] ? 300 : 0
     RefreshTray()
     if SettingsGui
         SettingsGui["Debug"].Value := Config["Debug"]
@@ -650,22 +816,45 @@ StopDetection(*)
     DetectorGui := 0
 }
 
-StartupEnabled()
+StartupStatus()
 {
     global StartupPath
-    return !!FileExist(StartupPath)
+    if !FileExist(StartupPath)
+        return "Off"
+    try FileGetShortcut StartupPath, &target, &workingDir, &arguments
+    catch
+        return "Foreign"
+    expectedTarget := A_IsCompiled ? A_ScriptFullPath : A_AhkPath
+    expectedArgs := A_IsCompiled ? "--startup" : '"' A_ScriptFullPath '" --startup'
+    if StrLower(target) != StrLower(expectedTarget)
+    {
+        SplitPath target, &name
+        SplitPath expectedTarget, &expectedName
+        return StrLower(name) = StrLower(expectedName) ? "Stale" : "Foreign"
+    }
+    if !FileExist(target) || arguments != expectedArgs || StrLower(workingDir) != StrLower(A_ScriptDir)
+        return "Stale"
+    return "Healthy"
+}
+
+StartupEnabled()
+{
+    return StartupStatus() = "Healthy"
 }
 
 SetStartup(enabled)
 {
     global StartupPath
+    status := StartupStatus()
     if enabled
     {
+        if status = "Foreign"
+            throw ValueError("启动快捷方式已被其他程序使用，未覆盖。请手工检查：" StartupPath)
         target := A_IsCompiled ? A_ScriptFullPath : A_AhkPath
         args := A_IsCompiled ? "--startup" : '"' A_ScriptFullPath '" --startup'
         FileCreateShortcut target, StartupPath, A_ScriptDir, args, "鼠标桌面手势"
     }
-    else if FileExist(StartupPath)
+    else if status != "Off" && status != "Foreign"
         FileDelete StartupPath
 }
 
@@ -682,7 +871,20 @@ ToggleStartup(*)
     if SettingsGui
         SettingsGui["Startup"].Value := StartupEnabled()
     if SettingsGui
+        UpdateStartupStatus()
+    if SettingsGui
         UiRefreshSwitches(SettingsGui)
+}
+
+UpdateStartupStatus()
+{
+    global SettingsGui
+    if !SettingsGui
+        return
+    status := StartupStatus()
+    message := status = "Healthy" ? "开机启动正常" : status = "Stale" ? "开机启动需要修复；保存时重建" : status = "Foreign" ? "启动快捷方式被其他程序占用" : "开机启动已关闭"
+    SettingsGui["StartupStatus"].Opt("c" (status = "Stale" || status = "Foreign" ? "B45309" : "64748B"))
+    SettingsGui["StartupStatus"].Text := message
 }
 
 AddButtonControls(g)
@@ -760,8 +962,8 @@ UpdateUiStatus()
 
 BuildSettings()
 {
-    global SettingsGui, Config, DraftApps, IconResource, PageControls, NavigationButtons
-    g := UiBase("鼠标桌面手势 1.5.1 · 设置")
+    global SettingsGui, Config, ConfigDamaged, DraftApps, IconResource, PageControls, NavigationButtons
+    g := UiBase("鼠标桌面手势 1.5.2 · 设置")
     SettingsGui := g
     PageControls := Map(), NavigationButtons := Map()
     if FileExist(IconResource)
@@ -780,7 +982,7 @@ BuildSettings()
     UiText(g, "x40 y133 w130 h20", "设置", 9, "94A3B8")
     for index, label in ["常规设置", "侧键手势", "应用白名单", "配置管理"]
         NavigationButtons[index] := UiButton(g, "x32 y" (171 + (index - 1) * 54) " w148 h42", label, SwitchSettingsPage.Bind(index), "nav")
-    UiText(g, "x40 y462 w130 h18", "VERSION 1.5.1", 8, "94A3B8")
+    UiText(g, "x40 y462 w130 h18", "VERSION 1.5.2", 8, "94A3B8")
     UiButton(g, "x32 y492 w148 h34", "关于这个应用", ShowAbout, "nav")
     UiCard(g, 212, 112, 628, 436)
 
@@ -799,8 +1001,9 @@ BuildSettings()
     g.AddText("x236 y410 w580 h1 BackgroundEEF2F7", "")
     UiSwitch(g, "x236 y422 w264 h32 vDebug", "Debug 日志")
     UiSwitch(g, "x536 y422 w264 h32 vStartup", "开机启动")
+    UiText(g, "x536 y455 w272 h18 vStartupStatus", "", 8, "64748B")
     UiSwitch(g, "x236 y464 w264 h32 vSilentMode", "静默模式")
-    UiText(g, "x536 y470 w272 h22", "隐藏托盘；再次打开 EXE 可管理", 9, "64748B")
+    UiText(g, "x536 y480 w272 h18", "隐藏托盘；再次打开 EXE 可管理", 8, "64748B")
     UiButton(g, "x236 y506 w132 h32", "检测按键", ShowDetector)
     UiButton(g, "x380 y506 w132 h32", "查看日志", OpenLogs)
     UiButton(g, "x524 y506 w132 h32 vPauseAction", "暂停手势", TogglePause)
@@ -846,6 +1049,8 @@ BuildSettings()
     UiButton(g, "x676 y562 w164 h38 Default", "保存并应用", SaveSettings, "primary", "F5F7FB")
     g.OnEvent("Close", CloseSettings), g.OnEvent("Escape", CloseSettings)
     FillSettings(Config)
+    if ConfigDamaged
+        SettingsGui["TransferStatus"].Text := "当前配置读取失败，正在使用默认值。`n保存时将隔离损坏文件，原备份保持不变。"
     SwitchSettingsPage(1)
     UpdateUiStatus()
     return g
@@ -856,7 +1061,8 @@ FillSettings(cfg)
     global SettingsGui, DraftApps, ConfigPath
     for key in ["Threshold", "ShortClickMs", "LockMs", "AxisRatio", "DebounceMs", "Debug", "SilentMode"]
         SettingsGui[key].Value := cfg[key]
-    SettingsGui["Startup"].Value := StartupEnabled()
+    SettingsGui["Startup"].Value := StartupStatus() = "Healthy" || StartupStatus() = "Stale"
+    UpdateStartupStatus()
     for button in ["XButton1", "XButton2"]
     {
         for key in ["Enabled", "ShortClick"]
@@ -992,7 +1198,7 @@ ShowAbout(*)
         g.AddPicture("x28 y28 w76 h76 Icon1", IconResource)
     UiText(g, "x128 y29 w354 h34", "鼠标桌面手势", 18, "0F172A", true)
     UiText(g, "x130 y76 w354 h22", "Mouse Desktop Gestures", 10, "64748B")
-    UiText(g, "x28 y133 w450 h28 vVersionInfo", "版本 1.5.1  ·  Windows 10 / 11 x64", 10, "2563EB")
+    UiText(g, "x28 y133 w450 h28 vVersionInfo", "版本 1.5.2  ·  Windows 10 / 11 x64", 10, "2563EB")
     g.AddText("x28 y179 w450 h1 BackgroundE8EDF4", "")
     UiText(g, "x28 y203 w450 h74", "按住侧键，滑动切换桌面。`n保留短按原功能，让鼠标操作更顺手。", 11, "334155")
     UiText(g, "x28 y289 w450 h48", "免安装运行  ·  JSON 配置  ·  配置分享`n运行引擎：AutoHotkey " A_AhkVersion, 9, "64748B")
@@ -1132,26 +1338,36 @@ SettingsConfig()
 
 SaveSettings(*)
 {
-    global Config, ConfigPath, SettingsGui, LogFailed
+    global Config, ConfigPath, SettingsGui, LogFailed, ConfigDamaged, ConfigWarning
     try
     {
         cfg := SettingsConfig()
-        oldStartup := StartupEnabled()
+        oldStartup := StartupStatus()
         SetStartup(SettingsGui["Startup"].Value)
-        try WriteConfig(ConfigPath, cfg)
+        try quarantined := WriteConfig(ConfigPath, cfg)
         catch as err
         {
-            SetStartup(oldStartup)
+            if oldStartup != "Foreign"
+                SetStartup(oldStartup != "Off")
             throw err
         }
+        ConfigDamaged := false, ConfigWarning := ""
+        if Config["Debug"] && !cfg["Debug"]
+            FlushDebugLog()
         Config := cfg, LogFailed := false
+        SetTimer FlushDebugLog, Config["Debug"] ? 300 : 0
         ApplyConfig()
         RefreshTray()
         Log("settings_saved", "excluded_count=" Config["ExcludedApps"].Length)
         CloseSettings()
+        if quarantined != ""
+            MsgBox "损坏配置已隔离到：`n" quarantined "`n原有 config.json.bak 未被覆盖。", "配置已恢复", "Iconi"
     }
     catch as err
+    {
+        RecordError("settings_save", err)
         MsgBox "设置未保存：`n" err.Message, "鼠标桌面手势", "Icon!"
+    }
 }
 
 ShowHelp(*)
@@ -1160,11 +1376,11 @@ ShowHelp(*)
         . "`n方向达到阈值并稳定后锁定；回到起点附近松开可取消。"
         . "`n`n双击托盘图标打开设置。应用白名单中的程序在前台时自动禁用手势。"
         . "`n按键检测期间事件原样传递，60 秒后自动结束。"
-        . "`nDebug 日志默认关闭，保存在 logs\debug.log，超过约 1 MB 后轮换。"
+        . "`nDebug 日志默认关闭，保存在 logs\debug.log，超过约 1 MB 后轮换；异常写入 logs\error.log。"
         . "`n`n配置为 config.json；首次升级自动读取旧 config.ini，原 INI 保留。"
-        . "`n手工修改 JSON 后需重启。保存时上一份 JSON 备份为 config.json.bak。"
-        . "`n开机启动是当前用户的启动快捷方式，移动程序后请关闭再开启该选项。",
-        "鼠标桌面手势 1.5.1 · 使用说明", "Iconi"
+        . "`n手工修改 JSON 后需重启。正常保存会将上一份 JSON 备份为 config.json.bak。"
+        . "`n损坏配置会单独隔离，不会覆盖原有备份。移动程序后可在设置页保存以修复开机启动。",
+        "鼠标桌面手势 1.5.2 · 使用说明", "Iconi"
 }
 
 Assert(value, message)
@@ -1186,16 +1402,25 @@ TestUiSwitches()
         SwitchSettingsPage(InStr(value.Name, "XButton") ? 2 : 1)
         Assert(!value.Visible, "Internal checkbox became visible")
         original := value.Value
-        PostMessage 0xF5, 0, 0, hwnd
-        Sleep 30
-        Assert(value.Value = !original, "Switch click did not change its setting")
-        PostMessage 0xF5, 0, 0, hwnd
-        Sleep 30
-        Assert(value.Value = original, "Switch click did not restore its setting")
+        SendMessage 0xF5, 0, 0, hwnd
+        Assert(WaitForSwitchValue(value, !original), "Switch click did not change its setting")
+        SendMessage 0xF5, 0, 0, hwnd
+        Assert(WaitForSwitchValue(value, original), "Switch click did not restore its setting")
         count += 1
     }
     Assert(count = 7 && Json.Dump(Config) = before, "Switches changed live config before saving")
     SwitchSettingsPage(1)
+}
+
+WaitForSwitchValue(value, expected)
+{
+    Loop 25
+    {
+        if value.Value = expected
+            return true
+        Sleep 20
+    }
+    return false
 }
 
 RunSelfTest()
@@ -1264,11 +1489,16 @@ RunSelfTest()
     TogglePause(), Assert(!Paused, "Resume failed")
     ShowDetector()
     DetectionEvent("XButton2", "松开")
-    Assert(Detecting && DetectorGui["Events"].GetCount() = 1 && !ShouldHandle(), "Detector mode")
+    Assert(Detecting && DetectorGui["Events"].GetCount() >= 1 && !ShouldHandle(), "Detector mode")
     StopDetection()
     Assert(!Detecting && !DetectorGui, "Detector cleanup")
+    Config["Debug"] := 0
+    RecordError("self_test", Error("self-test exception"))
+    Assert(InStr(FileRead(BaseDir "\logs\error.log", "UTF-8"), "version=1.5.2")
+        && InStr(FileRead(BaseDir "\logs\error.log", "UTF-8"), "self-test exception"), "Error log did not capture an exception with Debug off")
     Config["Debug"] := 1
     Log("self_test", "unicode=中文")
+    FlushDebugLog()
     Assert(InStr(FileRead(BaseDir "\logs\debug.log", "UTF-8"), "self_test"), "Debug log not written")
     fill := ""
     Loop 1100
@@ -1276,10 +1506,27 @@ RunSelfTest()
     Loop 10
         FileAppend fill, BaseDir "\logs\debug.log", "UTF-8-RAW"
     Log("after_rotation")
+    FlushDebugLog()
     Assert(FileExist(BaseDir "\logs\debug.log.1") && FileGetSize(BaseDir "\logs\debug.log") < 1000, "Log rotation failed")
     SetStartup(true)
     FileGetShortcut StartupPath, &target, , &startupArguments
     Assert(target = (A_IsCompiled ? A_ScriptFullPath : A_AhkPath) && InStr(startupArguments, "--startup"), "Startup target or silent launch argument")
+    Assert(StartupStatus() = "Healthy", "Valid startup shortcut marked unhealthy")
+    FileCreateShortcut target, StartupPath, A_ScriptDir, "--wrong", "损坏的启动快捷方式"
+    Assert(StartupStatus() = "Stale", "Wrong startup arguments were not detected")
+    SetStartup(true)
+    Assert(StartupStatus() = "Healthy", "Stale startup shortcut was not repaired")
+    FileCreateShortcut A_WinDir "\System32\notepad.exe", StartupPath, A_ScriptDir, "", "其他程序"
+    Assert(StartupStatus() = "Foreign", "Foreign startup shortcut was not detected")
+    rejected := false
+    try SetStartup(true)
+    catch
+        rejected := true
+    Assert(rejected && StartupStatus() = "Foreign", "Foreign startup shortcut was overwritten")
+    SetStartup(false)
+    Assert(StartupStatus() = "Foreign", "Foreign startup shortcut was deleted")
+    FileDelete StartupPath
+    SetStartup(true)
     if A_IsCompiled
     {
         FileCreateShortcut A_ScriptFullPath, StartupPath, A_ScriptDir, "", "旧版启动快捷方式"
@@ -1331,8 +1578,20 @@ RunSelfTest()
     catch
         rejected := true
     Assert(rejected && LoadConfig(ConfigPath)["Threshold"] = 90, "Export overwrote live config")
+    warningPath := BaseDir "\warning-config.json"
+    FileAppend '{"SchemaVersion":2,"Threshold":9999}', warningPath, "UTF-8-RAW"
+    warnings := []
+    recovered := LoadConfig(warningPath, "", warnings)
+    Assert(recovered["Threshold"] = 80 && warnings.Length = 1, "Invalid startup value was not reported")
+    backupBefore := FileRead(ConfigPath ".bak", "UTF-8")
+    FileDelete ConfigPath
+    FileAppend '{"SchemaVersion":2,"Threshold":', ConfigPath, "UTF-8-RAW"
+    quarantined := WriteConfig(ConfigPath, Defaults())
+    Assert(quarantined != "" && FileExist(quarantined), "Damaged config was not quarantined")
+    Assert(FileRead(ConfigPath ".bak", "UTF-8") = backupBefore, "Damaged config overwrote last good backup")
+    Assert(LoadConfig(ConfigPath)["Threshold"] = 80, "Recovered config was not saved")
     ShowAbout()
-    Assert(InStr(AboutGui["VersionInfo"].Text, "1.5.1"), "About version wrong")
+    Assert(InStr(AboutGui["VersionInfo"].Text, "1.5.2"), "About version wrong")
     Assert(InStr(AboutGui["AuthorLink"].Text, "Saksk-IT"), "About author missing")
     Assert(InStr(AboutGui["RepositoryLink"].Text, "Saksk-IT/MouseDesktopGestures"), "About repository missing")
     CloseAbout()
